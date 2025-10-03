@@ -27,7 +27,9 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8080")
-CORS(app, origins=[FRONTEND_URL], supports_credentials=True)
+CORS(app, resources={
+    r"/*": {"origins": ["https://wheel-app-five.vercel.app"], "supports_credentials": True}
+})
 
 
 
