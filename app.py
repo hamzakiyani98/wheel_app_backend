@@ -405,6 +405,79 @@ def profile():
     <a href='/logout'>Logout</a>
     """
 
+@app.route("/admin/default_winner", methods=["GET"])
+def get_default_winner():
+    user_data, status = verify_jwt()
+    if status != 200:
+        return jsonify({"error": "Not logged in"}), 401
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT is_admin FROM Spin_users WHERE email = %s", (user_data['email'],))
+    user = cursor.fetchone()
+    
+    if not user or not user[0]:
+        cursor.close()
+        conn.close()
+        return jsonify({"error": "Unauthorized"}), 403
+    
+    cursor.execute("SELECT id FROM Spin_users WHERE email = %s", (user_data['email'],))
+    user_id = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT mode, winner FROM admin_default_winner WHERE user_id = %s", (user_id,))
+    result = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    
+    if result:
+        return jsonify({"mode": result[0], "winner": result[1]})
+    return jsonify({"mode": "random", "winner": None})
+
+@app.route("/admin/default_winner", methods=["POST"])
+def set_default_winner():
+    user_data, status = verify_jwt()
+    if status != 200:
+        return jsonify({"error": "Not logged in"}), 401
+    
+    data = request.json
+    mode = data.get("mode", "random")
+    winner = data.get("winner")
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT is_admin FROM Spin_users WHERE email = %s", (user_data['email'],))
+    user = cursor.fetchone()
+    
+    if not user or not user[0]:
+        cursor.close()
+        conn.close()
+        return jsonify({"error": "Unauthorized"}), 403
+    
+    cursor.execute("SELECT id FROM Spin_users WHERE email = %s", (user_data['email'],))
+    user_id = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT id FROM admin_default_winner WHERE user_id = %s", (user_id,))
+    existing = cursor.fetchone()
+    
+    if existing:
+        cursor.execute("""
+            UPDATE admin_default_winner 
+            SET mode = %s, winner = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = %s
+        """, (mode, winner, user_id))
+    else:
+        cursor.execute("""
+            INSERT INTO admin_default_winner (user_id, mode, winner)
+            VALUES (%s, %s, %s)
+        """, (user_id, mode, winner))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    return jsonify({"success": True})
+
+
 @app.route("/user")
 def get_user():
     user_data, status = verify_jwt()
