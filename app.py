@@ -70,48 +70,64 @@ def verify_jwt():
 
 @app.route("/refresh_token", methods=["POST"])
 def refresh_token():
-    data = request.json
-    refresh_token = data.get("refresh_token")
-    if not refresh_token:
-        return jsonify({"error": "Missing refresh token"}), 400
+    try:
+        data = request.json
+        refresh_token = data.get("refresh_token")
+        if not refresh_token:
+            return jsonify({"error": "Missing refresh token"}), 400
 
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM spin_user_tokens WHERE refresh_token = %s AND revoked = 0 AND expires_at > NOW()", (refresh_token,))
-    token_info = cursor.fetchone()
-    if not token_info:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM spin_user_tokens WHERE refresh_token = %s AND revoked = 0 AND expires_at > NOW()", (refresh_token,))
+        token_info = cursor.fetchone()
+        
+        if not token_info:
+            cursor.close()
+            conn.close()
+            return jsonify({"error": "Invalid or expired refresh token"}), 401
+
+        user_id = token_info[0]
+        cursor.execute("SELECT email, name FROM Spin_users WHERE id = %s", (user_id,))
+        user_info = cursor.fetchone()
+        
+        if not user_info:
+            cursor.close()
+            conn.close()
+            return jsonify({"error": "User not found"}), 404
+
+        email, name = user_info
+        
+        token_payload = {
+            'user_id': user_id,
+            'email': email,
+            'name': name,
+            'exp': datetime.utcnow() + timedelta(days=7)
+        }
+        
+        new_token = jwt.encode(token_payload, SECRET_KEY, algorithm='HS256')
+        
+        # Ensure token is a string
+        if isinstance(new_token, bytes):
+            new_token = new_token.decode('utf-8')
+
+        new_refresh_token = str(uuid.uuid4())
+        expires_at = datetime.utcnow() + timedelta(days=30)
+        
+        cursor.execute("""
+            INSERT INTO spin_user_tokens (user_id, token, refresh_token, expires_at)
+            VALUES (%s, %s, %s, %s)
+        """, (user_id, new_token, new_refresh_token, expires_at))
+        cursor.execute("UPDATE spin_user_tokens SET revoked = 1 WHERE refresh_token = %s", (refresh_token,))
+        conn.commit()
         cursor.close()
         conn.close()
-        return jsonify({"error": "Invalid or expired refresh token"}), 401
 
-    user_id = token_info[0]
-    cursor.execute("SELECT email, name FROM Spin_users WHERE id = %s", (user_id,))
-    user_info = cursor.fetchone()
-    if not user_info:
-        cursor.close()
-        conn.close()
-        return jsonify({"error": "User not found"}), 404
-
-    email, name = user_info
-    new_token = jwt.encode({
-        'user_id': user_id,
-        'email': email,
-        'name': name,
-        'exp': datetime.utcnow() + timedelta(days=7)
-    }, SECRET_KEY, algorithm='HS256')
-
-    new_refresh_token = str(uuid.uuid4())
-    expires_at = datetime.utcnow() + timedelta(days=30)
-    cursor.execute("""
-        INSERT INTO spin_user_tokens (user_id, token, refresh_token, expires_at)
-        VALUES (%s, %s, %s, %s)
-    """, (user_id, new_token, new_refresh_token, expires_at))
-    cursor.execute("UPDATE spin_user_tokens SET revoked = 1 WHERE refresh_token = %s", (refresh_token,))
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    return jsonify({"success": True, "token": new_token, "refresh_token": new_refresh_token})
+        return jsonify({"success": True, "token": new_token, "refresh_token": new_refresh_token})
+    except Exception as e:
+        logger.error(f"Refresh token error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"error": "Token refresh failed"}), 500
 
 
 @app.route("/")
@@ -156,83 +172,6 @@ def connect_google():
     return redirect(request_uri)
 
 
-@app.route("/callback")
-def callback():
-    logger.debug("Callback route hit")
-    code = request.args.get("code")
-    logger.debug(f"Received code: {code}")
-
-    google_provider_cfg = get_google_provider_cfg()
-    token_endpoint = google_provider_cfg["token_endpoint"]
-
-    token_url, headers, body = client.prepare_token_request(
-        token_endpoint,
-        authorization_response=request.url,
-        redirect_url=request.base_url,
-        code=code
-    )
-    token_response = requests.post(
-        token_url,
-        headers=headers,
-        data=body,
-        auth=(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET),
-    )
-    if token_response.status_code != 200:
-        logger.error(f"Token request failed: {token_response.text}")
-        return redirect("http://localhost:8080/?error=token_failed")
-    token_data = token_response.json()
-    client.parse_request_body_response(token_response.text)
-
-    session['access_token'] = token_data['access_token']
-    session['refresh_token'] = token_data.get('refresh_token')
-    session['id_token'] = token_data['id_token']
-
-    userinfo_endpoint = google_provider_cfg["userinfo_endpoint"]
-    uri, headers, body = client.add_token(userinfo_endpoint)
-    userinfo_response = requests.get(uri, headers=headers, data=body)
-    userinfo = userinfo_response.json()
-
-    session["email"] = userinfo.get("email")
-    session["name"] = userinfo.get("name")
-    session["picture"] = userinfo.get("picture")
-
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM Spin_users WHERE email = %s", (session["email"],))
-    user = cursor.fetchone()
-    if not user:
-        cursor.execute("INSERT INTO Spin_users (email, name, picture) VALUES (%s, %s, %s)", 
-                       (session["email"], session["name"], session["picture"]))
-        conn.commit()
-        cursor.execute("SELECT id FROM Spin_users WHERE email = %s", (session["email"],))
-        user = cursor.fetchone()
-
-    # Generate JWT token
-    token = jwt.encode({
-        'user_id': user[0],
-        'email': session["email"],
-        'name': session["name"],
-        'exp': datetime.utcnow() + timedelta(days=7)
-    }, SECRET_KEY, algorithm='HS256')
-
-    refresh_token_str = str(uuid.uuid4())
-    expires_at = datetime.utcnow() + timedelta(days=30)
-
-    # Store token in database
-    cursor.execute("""
-        INSERT INTO spin_user_tokens (user_id, token, refresh_token, expires_at)
-        VALUES (%s, %s, %s, %s)
-    """, (user[0], token, refresh_token_str, expires_at))
-    conn.commit()
-    
-    cursor.close()
-    conn.close()
-
-    logger.debug(f"Session after login: {session}")
-    logger.debug("Redirecting to React app")
-
-    return redirect(f"{FRONTEND_URL}/?token={token}&refresh_token={refresh_token_str}")
-
 @app.route("/signup", methods=["POST"])
 def signup():
     data = request.json
@@ -268,59 +207,191 @@ def signup():
 
     return jsonify({"success": True})
 
+@app.route("/callback")
+def callback():
+    try:
+        logger.debug("Callback route hit")
+        code = request.args.get("code")
+        logger.debug(f"Received code: {code}")
+
+        google_provider_cfg = get_google_provider_cfg()
+        token_endpoint = google_provider_cfg["token_endpoint"]
+
+        token_url, headers, body = client.prepare_token_request(
+            token_endpoint,
+            authorization_response=request.url,
+            redirect_url=request.base_url,
+            code=code
+        )
+        token_response = requests.post(
+            token_url,
+            headers=headers,
+            data=body,
+            auth=(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET),
+        )
+        
+        if token_response.status_code != 200:
+            logger.error(f"Token request failed: {token_response.text}")
+            return redirect(f"{FRONTEND_URL}/?error=token_failed")
+        
+        token_data = token_response.json()
+        client.parse_request_body_response(token_response.text)
+
+        session['access_token'] = token_data['access_token']
+        session['refresh_token'] = token_data.get('refresh_token')
+        session['id_token'] = token_data['id_token']
+
+        userinfo_endpoint = google_provider_cfg["userinfo_endpoint"]
+        uri, headers, body = client.add_token(userinfo_endpoint)
+        userinfo_response = requests.get(uri, headers=headers, data=body)
+        
+        if userinfo_response.status_code != 200:
+            logger.error(f"Userinfo request failed: {userinfo_response.text}")
+            return redirect(f"{FRONTEND_URL}/?error=userinfo_failed")
+        
+        userinfo = userinfo_response.json()
+
+        session["email"] = userinfo.get("email")
+        session["name"] = userinfo.get("name")
+        session["picture"] = userinfo.get("picture")
+
+        conn = get_db()
+        if not conn:
+            logger.error("Database connection failed")
+            return redirect(f"{FRONTEND_URL}/?error=db_failed")
+        
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("SELECT id FROM Spin_users WHERE email = %s", (session["email"],))
+            user = cursor.fetchone()
+            
+            if not user:
+                cursor.execute(
+                    "INSERT INTO Spin_users (email, name, picture) VALUES (%s, %s, %s)", 
+                    (session["email"], session["name"], session["picture"])
+                )
+                conn.commit()
+                cursor.execute("SELECT id FROM Spin_users WHERE email = %s", (session["email"],))
+                user = cursor.fetchone()
+            
+            if not user:
+                logger.error("Failed to create or retrieve user")
+                cursor.close()
+                conn.close()
+                return redirect(f"{FRONTEND_URL}/?error=user_creation_failed")
+
+            user_id = user[0]
+
+            # Generate JWT token
+            token_payload = {
+                'user_id': user_id,
+                'email': session["email"],
+                'name': session["name"],
+                'exp': datetime.utcnow() + timedelta(days=7)
+            }
+            
+            token = jwt.encode(token_payload, SECRET_KEY, algorithm='HS256')
+            
+            # Ensure token is a string
+            if isinstance(token, bytes):
+                token = token.decode('utf-8')
+
+            refresh_token_str = str(uuid.uuid4())
+            expires_at = datetime.utcnow() + timedelta(days=30)
+
+            # Store token in database
+            cursor.execute("""
+                INSERT INTO spin_user_tokens (user_id, token, refresh_token, expires_at)
+                VALUES (%s, %s, %s, %s)
+            """, (user_id, token, refresh_token_str, expires_at))
+            conn.commit()
+            
+            logger.debug(f"Token generated successfully for user {user_id}")
+            logger.debug(f"Session after login: {session}")
+            logger.debug("Redirecting to React app")
+
+        except Exception as db_error:
+            logger.error(f"Database error: {db_error}")
+            conn.rollback()
+            return redirect(f"{FRONTEND_URL}/?error=db_error")
+        finally:
+            cursor.close()
+            conn.close()
+
+        return redirect(f"{FRONTEND_URL}/?token={token}&refresh_token={refresh_token_str}")
+        
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return redirect(f"{FRONTEND_URL}/?error=callback_failed")
+
 @app.route("/login_email", methods=["POST"])
 def login_email():
-    data = request.json
-    email = data.get("email")
-    password = data.get("password")
+    try:
+        data = request.json
+        email = data.get("email")
+        password = data.get("password")
 
-    if not email or not password:
-        return jsonify({"error": "Missing email or password"}), 400
+        if not email or not password:
+            return jsonify({"error": "Missing email or password"}), 400
 
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, username, password_hash FROM spin_user_credentials WHERE email = %s", (email,))
-    user = cursor.fetchone()
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, username, password_hash FROM spin_user_credentials WHERE email = %s", (email,))
+        user = cursor.fetchone()
 
-    if not user or not bcrypt.checkpw(password.encode('utf-8'), user[2].encode('utf-8')):
+        if not user or not bcrypt.checkpw(password.encode('utf-8'), user[2].encode('utf-8')):
+            cursor.close()
+            conn.close()
+            return jsonify({"error": "Invalid email or password"}), 401
+
+        cursor.execute("SELECT email, name FROM Spin_users WHERE id = %s", (user[0],))
+        user_info = cursor.fetchone()
+
+        session["email"] = user_info[0]
+        session["name"] = user_info[1]
+        session["picture"] = None
+
+        # Generate JWT token
+        token_payload = {
+            'user_id': user[0],
+            'email': user_info[0],
+            'name': user_info[1],
+            'exp': datetime.utcnow() + timedelta(days=7)
+        }
+        
+        token = jwt.encode(token_payload, SECRET_KEY, algorithm='HS256')
+        
+        # Ensure token is a string
+        if isinstance(token, bytes):
+            token = token.decode('utf-8')
+
+        refresh_token_str = str(uuid.uuid4())
+        expires_at = datetime.utcnow() + timedelta(days=30)
+
+        cursor.execute("""
+            INSERT INTO spin_user_tokens (user_id, token, refresh_token, expires_at)
+            VALUES (%s, %s, %s, %s)
+        """, (user[0], token, refresh_token_str, expires_at))
+        conn.commit()
+
         cursor.close()
         conn.close()
-        return jsonify({"error": "Invalid email or password"}), 401
-
-    cursor.execute("SELECT email, name FROM Spin_users WHERE id = %s", (user[0],))
-    user_info = cursor.fetchone()
-
-    session["email"] = user_info[0]
-    session["name"] = user_info[1]
-    session["picture"] = None
-
-    # Generate JWT token
-    token = jwt.encode({
-        'user_id': user[0],
-        'email': user_info[0],
-        'name': user_info[1],
-        'exp': datetime.utcnow() + timedelta(days=7)
-    }, SECRET_KEY, algorithm='HS256')
-
-    refresh_token_str = str(uuid.uuid4())
-    expires_at = datetime.utcnow() + timedelta(days=30)
-
-    cursor.execute("""
-        INSERT INTO spin_user_tokens (user_id, token, refresh_token, expires_at)
-        VALUES (%s, %s, %s, %s)
-    """, (user[0], token, refresh_token_str, expires_at))
-    conn.commit()
-
-    cursor.close()
-    conn.close()
-    
-    return jsonify({
-        "success": True, 
-        "email": user_info[0], 
-        "name": user_info[1],
-        "token": token,
-        "refresh_token": refresh_token_str
-    })
+        
+        return jsonify({
+            "success": True, 
+            "email": user_info[0], 
+            "name": user_info[1],
+            "token": token,
+            "refresh_token": refresh_token_str
+        })
+    except Exception as e:
+        logger.error(f"Login email error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"error": "Login failed"}), 500
 
 @app.route("/profile")
 def profile():
