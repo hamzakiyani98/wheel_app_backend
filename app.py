@@ -486,7 +486,7 @@ def get_user():
     
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, last_wheel_id FROM Spin_users WHERE email = %s", (user_data['email'],))
+    cursor.execute("SELECT id, last_wheel_id, is_admin FROM Spin_users WHERE email = %s", (user_data['email'],))
     user_result = cursor.fetchone()
     
     if not user_result:
@@ -496,6 +496,7 @@ def get_user():
     
     user_id = user_result[0]
     last_wheel_id = user_result[1]
+    is_admin = user_result[2]  # Get is_admin field
     current_wheel = None
     
     if last_wheel_id:
@@ -521,8 +522,10 @@ def get_user():
         "email": user_data['email'],
         "name": user_data['name'],
         "picture": session.get('picture'),
+        "is_admin": bool(is_admin),  # Add is_admin to response
         "current_wheel": current_wheel
     })
+
 
 @app.route("/advanced_settings", methods=["GET"])
 def get_advanced_settings():
