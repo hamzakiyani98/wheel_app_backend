@@ -146,6 +146,8 @@ def login():
         authorization_endpoint,
         redirect_uri=request.base_url.replace("login", "callback"),
         scope=["openid", "email", "profile", "https://www.googleapis.com/auth/spreadsheets.readonly"],
+        access_type="offline",  # ← Add this
+        prompt="consent"        # ← Add this to force consent screen
     )
     return redirect(request_uri)
 
