@@ -145,7 +145,7 @@ def login():
     request_uri = client.prepare_request_uri(
         authorization_endpoint,
         redirect_uri=request.base_url.replace("login", "callback"),
-        scope=["openid", "email", "profile", "https://www.googleapis.com/auth/spreadsheets.readonly"],
+        scope=["openid", "email", "profile"],
         access_type="offline",  # ← Add this
         prompt="consent"        # ← Add this to force consent screen
     )
@@ -168,7 +168,7 @@ def connect_google():
     request_uri = client.prepare_request_uri(
         authorization_endpoint,
         redirect_uri=request.base_url.replace("connect_google", "callback"),
-        scope=["openid", "email", "profile", "https://www.googleapis.com/auth/spreadsheets.readonly"],
+        scope=["openid", "email", "profile"],
         state=state
     )
     return redirect(request_uri)
